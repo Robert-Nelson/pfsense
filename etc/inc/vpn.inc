@@ -89,6 +89,15 @@ function vpn_ipsec_convert_to_modp($index)
 	case '18':
 		$convertion = "modp8192";
 		break;
+	case '19':
+		$convertion = "ecp256";
+		break;
+	case '20':
+		$convertion = "ecp384";
+		break;
+	case '21':
+		$convertion = "ecp512";
+		break;
 	}
 
 	return $convertion;
@@ -104,6 +113,9 @@ function vpn_ipsec_configure($restart = false)
 	/* get the automatic ping_hosts.sh ready */
 	unlink_if_exists("{$g['vardb_path']}/ipsecpinghosts");
 	touch("{$g['vardb_path']}/ipsecpinghosts");
+	
+	/* service may have been enabled, disabled, or otherwise changed in a way requiring rule updates */
+	filter_configure();
 
 	$syscfg = $config['system'];
 	$ipseccfg = $config['ipsec'];
@@ -119,8 +131,6 @@ function vpn_ipsec_configure($restart = false)
 		/* disallow IPSEC, it is off */
 		mwexec("/sbin/ifconfig enc0 down");
 		set_single_sysctl("net.inet.ip.ipsec_in_use", "0");
-
-		filter_configure();
 
 		return 0;
 	}
@@ -321,7 +331,12 @@ function vpn_ipsec_configure($restart = false)
 		mwexec("mv /usr/local/lib/ipsec/plugins/libstrongswan-unity.MOVED /usr/local/lib/ipsec/plugins/libstrongswan-unity.so");
 		conf_mount_ro();
 	}
-	
+
+	$makebeforebreak = '';
+	if (isset($config['ipsec']['makebeforebreak'])) {
+		$makebeforebreak = 'make_before_break = yes';
+	}
+
 	if (isset($config['ipsec']['enableinterfacesuse'])) {
 		if (!empty($ifacesuse)) {
 			$ifacesuse = 'interfaces_use = ' . implode(',', array_unique($ifacesuse));
@@ -352,6 +367,7 @@ install_routes = no
 {$accept_unencrypted}
 cisco_unity = {$unity_enabled}
 {$ifacesuse}
+{$makebeforebreak}
 
 # And two loggers using syslog. The subsections define the facility to log
 # to, currently one of: daemon, auth.
@@ -372,6 +388,28 @@ syslog {
 EOD;
 
 	$strongswan .= "\tplugins {\n";
+
+	$a_servers = auth_get_authserver_list();
+	foreach ($a_servers as $id => $pconfig) {
+		if ($id == $config['ipsec']['client']['user_source'] && $pconfig['type'] == "radius") {
+			$strongswan .= <<<EOD
+		eap-radius {
+			class_group = yes
+			eap_start = no
+			servers {
+				primary {
+					address = {$pconfig['host']}
+					secret = {$pconfig['radius_secret']}
+					auth_port = {$pconfig['radius_auth_port']}
+					acct_port = {$pconfig['radius_acct_port']}
+				}
+			}
+		}
+
+EOD;
+			break;
+		}
+	}
 
 	if (is_array($a_client) && isset($a_client['enable'])) {
 		$strongswan .= "\t\tattr {\n";
@@ -499,7 +537,7 @@ EOD;
 				continue;
 
 			if (strstr($ph1ent['authentication_method'], 'rsa') ||
-			    in_array($ph1ent['authentication_method'], array('eap-mschapv2', 'eap-tls'))) {
+			    in_array($ph1ent['authentication_method'], array('eap-mschapv2', 'eap-tls', 'eap-radius'))) {
 				$certline = '';
 
 				$ikeid = $ph1ent['ikeid'];
@@ -530,14 +568,14 @@ EOD;
 				/* XXX" Traffic selectors? */
 				$pskconf .= " : RSA {$ph1keyfile}\n";
 			} else {
-				list ($myid_type, $myid_data) = ipsec_find_id($ph1ent, "local");
-				list ($peerid_type, $peerid_data) = ipsec_find_id($ph1ent, "peer", $rgmap);
+				list ($myid_type, $myid_data) = ipsec_find_id($ph1ent, 'local');
+				list ($peerid_type, $peerid_data) = ipsec_find_id($ph1ent, 'peer', $rgmap);
 
 				if (empty($peerid_data))
 					continue;
 
 				$myid = isset($ph1ent['mobile']) ? trim($myid_data) : "%any";
-				$peerid = ($peerid_data != "allusers") ? trim($peerid_data) : "";
+				$peerid = ($peerid_data != 'allusers') ? trim($peerid_data) : '';
 				if (!empty($ph1ent['pre-shared-key'])) {
 					if ($myid_type == 'fqdn' && !empty($myid_data))
 						$pskconf .= "@{$myid} {$peerid} : PSK 0s" . base64_encode(trim($ph1ent['pre-shared-key'])) . "\n";
@@ -708,17 +746,19 @@ EOD;
 				}
 			}
 
-			list ($myid_type, $myid_data) = ipsec_find_id($ph1ent, "local");
-			if ($myid_type == 'fqdn')
-				$myid_data = "@{$myid_data}";
-			list ($peerid_type, $peerid_data) = ipsec_find_id($ph1ent, "peer", $rgmap);
-			if ($peerid_type == 'fqdn')
-				$peerid_data = "@{$peerid_data}";
+			list ($myid_type, $myid_data) = ipsec_find_id($ph1ent, 'local');
+			if ($myid_type != 'address')
+				$myid_data = "{$myid_type}:{$myid_data}";
 
 			/* Only specify peer ID if we are not dealing with a mobile PSK-only tunnel */
 			$peerid_spec = '';
-			if (!isset($ph1ent['mobile']))
-				$peerid_spec = $peerid_data;
+			if (!isset($ph1ent['mobile'])) {
+				list ($peerid_type, $peerid_data) = ipsec_find_id($ph1ent, 'peer', $rgmap);
+				if ($peerid_type != 'address')
+					$peerid_spec = "{$peerid_type}:{$peerid_data}";
+				else
+					$peerid_spec = $peerid_data;
+			}
 
 			if (is_array($ph1ent['encryption-algorithm']) && !empty($ph1ent['encryption-algorithm']['name']) && !empty($ph1ent['hash-algorithm'])) {
 				$ealgosp1 = '';
@@ -773,6 +813,18 @@ EOD;
 						$authentication .= "\n\tleftcert={$certpath}/cert-{$ph1ent['ikeid']}.crt";
 				} else {
 					$authentication = "leftauth=eap-tls\n\trightauth=eap-tls";
+					if (!empty($ph1ent['certref']))
+						$authentication .= "\n\tleftcert={$certpath}/cert-{$ph1ent['ikeid']}.crt";
+				}
+				break;
+			case 'eap-radius':
+				if (isset($ph1ent['mobile'])) {
+					$authentication = "eap_identity=%identity\n\t";
+					$authentication .= "leftauth=pubkey\n\trightauth=eap-radius";
+					if (!empty($ph1ent['certref']))
+						$authentication .= "\n\tleftcert={$certpath}/cert-{$ph1ent['ikeid']}.crt";
+				} else {
+					$authentication = "leftauth=eap-radius\n\trightauth=eap-radius";
 					if (!empty($ph1ent['certref']))
 						$authentication .= "\n\tleftcert={$certpath}/cert-{$ph1ent['ikeid']}.crt";
 				}
@@ -1022,11 +1074,19 @@ EOD;
 			if (!isset($ph1ent['mobile']) && $keyexchange == 'ikev1') {
 				if (!empty($rightsubnet_spec)) {
 					$ipsecfin = '';
+					$keyingtries = 3;
 					foreach ($rightsubnet_spec as $idx => $rsubnet) {
 						$ipsecfin .= "\nconn con{$ph1ent['ikeid']}00{$idx}\n";
 						if (!empty($reqids[$idx]))
 							$ipsecfin .= "\treqid = " . $reqids[$idx] . "\n";
 						$ipsecfin .= $ipsecconnect;
+						/*
+						 * This is for making strongswan consider the various similar
+						 * connection profiles as different and forces it to create
+						 * separate IKE SAs for each subnet from P2
+						 */
+						$ipsecfin .= "\tkeyingtries = {$keyingtries}\n";
+						$keyingtries++;
 						$ipsecfin .= "\trightsubnet = {$rsubnet}\n";
 						$ipsecfin .= "\tleftsubnet = " . $leftsubnet_spec[$idx] . "\n";
 					}
@@ -1048,7 +1108,7 @@ EOD;
 					$tempsubnets = array();
 					foreach ($leftsubnet_spec as $leftsubnet)
 						$tempsubnets[$leftsubnet] = $leftsubnet;
-					$ipsecfin .= "\tleftsubnet = " . join(",", $leftsubnet_spec) . "\n";
+					$ipsecfin .= "\tleftsubnet = " . join(",", $tempsubnets) . "\n";
 					unset($tempsubnets, $leftsubnet);
 				}
 			}
@@ -1071,11 +1131,10 @@ EOD;
 	if ($restart === true) {
 		mwexec("/usr/local/sbin/ipsec restart", false); 
 	} else {
-		if (isvalidpid("{$g['varrun_path']}/charon.pid")) {
-			/* Read secrets */
-			mwexec("/usr/local/sbin/ipsec rereadall", false);
+		if (isvalidpid("{$g['varrun_path']}/starter.charon.pid")) {
 			/* Update configuration changes */
-			mwexec("/usr/local/sbin/ipsec update", false);
+			/* Read secrets */
+			sigkillbypid("{$g['varrun_path']}/starter.charon.pid", 'USR1');
 		} else {
 			mwexec("/usr/local/sbin/ipsec start", false); 
 		}

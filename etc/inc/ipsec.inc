@@ -105,6 +105,9 @@ $p1_dhgroups = array(
 	16 => '16 (4096 bit)',
 	17 => '17 (6144 bit)',
 	18 => '18 (8192 bit)',
+	19 => '19 (nist ecp256)',
+	20 => '20 (nist ecp384)',
+	21 => '21 (nist ecp521)',
 	22 => '22 (1024(sub 160) bit)',
 	23 => '23 (2048(sub 224) bit)',
 	24 => '24 (2048(sub 256) bit)'
@@ -126,6 +129,7 @@ $p1_authentication_methods = array(
 	'xauth_rsa_server' => array( 'name' => 'Mutual RSA + Xauth', 'mobile' => true ),
 	'xauth_psk_server' => array( 'name' => 'Mutual PSK + Xauth', 'mobile' => true ),
 	'eap-tls' => array( 'name' => 'EAP-TLS', 'mobile' => true),
+	'eap-radius' => array( 'name' => 'EAP-RADIUS', 'mobile' => true),
 	'eap-mschapv2' => array( 'name' => 'EAP-MSChapv2', 'mobile' => true),
 	'rsasig' => array( 'name' => 'Mutual RSA', 'mobile' => false ),
 	'pre_shared_key' => array( 'name' => 'Mutual PSK', 'mobile' => false ) );
@@ -649,41 +653,41 @@ function ipsec_find_id(& $ph1ent, $side = "local", $rgmap = array()) {
 			$addr = "%any";
 		else
 			$addr = $ph1ent['remote-gateway'];
-	} else {
+	} else
 		return array();
-	}
 
 
 	$thisid_type = $id_type;
 	switch ($thisid_type) {
-	case "myaddress":
-		$thisid_type = "address";
+	case 'myaddress':
+		$thisid_type = 'address';
 		$thisid_data = $addr;
 		break;
-
-	case "dyn_dns":
-		$thisid_type = "address";
-		$thisid_data = resolve_retry($id_data);
+	case 'dyn_dns':
+		$thisid_type = 'dns';
+		$thisid_data = $id_data;
 		break;
-
-	case "peeraddress":
-		$thisid_type = "address";
+	case 'peeraddress':
+		$thisid_type = 'address';
 		$thisid_data = $rgmap[$ph1ent['remote-gateway']];
 		break;
-
-	case "address";
+	case 'address':
 		$thisid_data = $id_data;
 		break;
-
-	case "fqdn";
-	case "keyid tag";
-	case "user_fqdn";
-		$thisid_data = $id_data;
+	case 'fqdn':
+		$thisid_data = "{$id_data}";
 		break;
-	case "asn1dn";
+	case 'keyid tag':
+		$thisid_type = 'keyid';
+		$thisid_data = "{$thisid_data}";
+		break;
+	case 'user_fqdn':
+		$thisid_type = 'userfqdn';
+		$thisid_data = "{$id_data}";
+		break;
+	case 'asn1dn':
 		$thisid_data = $id_data;
-		if( $thisid_data && $thisid_data[0] != '"')
-			$thisid_data = "\"{$thisid_data}\"";
+		$thisid_data = "{$id_data}";
 		break;
 	}
 	return array($thisid_type, $thisid_data);
